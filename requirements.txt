@@ -1,0 +1,10 @@
+requests
+fastapi~=0.78.0
+uvicorn~=0.17.6
+python-multipart
+# FileResponse依赖
+aiofiles
+pymysql~=1.0.2
+redis~=4.3.1
+sqlalchemy~=1.4.36
+pydantic~=1.9.0
