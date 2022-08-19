@@ -57,7 +57,7 @@ app.add_middleware(
 # *****************************************************
 # 解决接口文档的静态文件问题
 # *****************************************************
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory="./app/static"), name="static")
 
 
 @app.get("/docs", include_in_schema=False)
