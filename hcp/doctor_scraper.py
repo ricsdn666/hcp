@@ -378,17 +378,37 @@ def get_rabbitmq_connection():
 
 
 def safe_ack(channel, delivery_tag, requeue=False):
-    try:
-        if channel and channel.is_open:
-            if requeue:
-                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-            else:
-                channel.basic_ack(delivery_tag=delivery_tag)
-            return True
-    except Exception as e:
-        print(f"⚠️  RabbitMQ 操作失败: {e}")
+    """
+    安全确认消息
+
+    Args:
+        channel: RabbitMQ channel
+        delivery_tag: 消息的 delivery tag
+        requeue: 是否重新入队（False=确认删除，True=nack并重新入队）
+
+    Returns:
+        bool: 是否成功确认
+    """
+    if channel is None:
+        print(f"⚠️  Channel 为 None，无法确认消息 (delivery_tag={delivery_tag})")
         sys.stdout.flush()
-    return False
+        return False
+
+    try:
+        if requeue:
+            channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+            print(f"📤 消息已 nack 并重新入队 (delivery_tag={delivery_tag})")
+        else:
+            channel.basic_ack(delivery_tag=delivery_tag)
+            print(f"✅ 消息已 ack 确认删除 (delivery_tag={delivery_tag})")
+        sys.stdout.flush()
+        return True
+
+    except Exception as e:
+        print(f"❌ RabbitMQ ack 操作失败: {type(e).__name__}: {e}")
+        print(f"   delivery_tag={delivery_tag}, requeue={requeue}")
+        sys.stdout.flush()
+        return False
 
 
 def process_hospital(channel, hospital_data: Dict[str, Any], delivery_tag):
@@ -500,11 +520,15 @@ def process_hospital(channel, hospital_data: Dict[str, Any], delivery_tag):
         print("=" * 70)
         sys.stdout.flush()
 
-        if safe_ack(channel, delivery_tag):
+        ack_success = safe_ack(channel, delivery_tag)
+        if ack_success:
             processed_count += 1
-            print(f"\n✅ 消息已确认 (Delivery Tag: {delivery_tag})")
             print(f"📊 [{my_consumer_id}] 总计已处理: {processed_count} 条消息\n")
-            sys.stdout.flush()
+        else:
+            print(
+                f"⚠️  消息确认失败，消息可能仍留在队列中 (delivery_tag={delivery_tag})\n"
+            )
+        sys.stdout.flush()
 
     except KeyboardInterrupt:
         print("\n⚠️  用户中断任务")
