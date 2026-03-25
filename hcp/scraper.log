@@ -1,0 +1,10 @@
+🚀 启动医生信息抓取器...
+📍 RabbitMQ URL: amqp://guest:147258369aB***@r.pisiewang.top:45672/
+📥 消费队列：CacheHosp
+📤 生产队列：DoctorResult
+🤖 CoPaw API: http://localhost:8088
+------------------------------------------------------------
+✅ 连接成功，开始消费消息...
+按 Ctrl+C 停止
+
+✅ 连接已关闭
