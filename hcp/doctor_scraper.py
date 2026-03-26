@@ -268,27 +268,28 @@ PROMPT_TEMPLATE = r"""
 
 - 职称（title）：**必须准确提取，特别注意区分正高和副高**
   **提取优先级：**
-  1. **键值对中的"职称"**
+  1. **键值对中的"职称"**（最优先，最准确！）
      - 如果值是标准职称（主任医师、副主任医师等），直接提取
-     - 如果值是**非标准职称**（如"省内知名专家"、"知名专家"、"专家"等），需要从简介中查找真正的职称
+     - **必须原样提取，不能修改！**
+     - 例如："职称/职务：副主任医师" → title="副主任医师"
   2. **个人简介中的职称关键词**
      - 在简介开头通常有职称信息
-     - 例如："张梦真，女，教授，博士，主任医师" → title="主任医师"（或"教授、主任医师"）
+     - 例如："张梦真，女，教授，博士，主任医师" → title="主任医师"
      - 关键词：主任医师、副主任医师、主治医师、教授、副教授、研究员等
      - **技师类职称：**主任技师、副主任技师、主管技师、技师（注意不是"医师"）
-  3. **从社会职务/学术任职推断**
+  3. **从社会职务/学术任职推断**（仅当没有明确职称时使用）
      - 如果担任省级学会副主任委员、副会长等，通常是**主任医师**级别
      - 如果担任市级学会主委/副主委，通常是**副主任医师**级别
   **关键区分：**
-     - "副主任医师" ≠ "主任医师"（注意"副"字！）
-     - "副主任医师" → title="副主任医师"
-     - "主任医师" → title="主任医师"
-     - "主治医师" → title="主治医师"
-     - "副主任技师" → title="副主任技师"（注意是"技师"不是"医师"）
-     - **"省内知名专家" → 需要从简介或社会职务推断，通常是"主任医师"**
+     - **"副主任医师" ≠ "主任医师"（注意"副"字！）**
+     - **"副主任医师" → title="副主任医师"（绝对不能改成"主任医师"）**
+     - **"主任医师" → title="主任医师"**
+     - **"主治医师" → title="主治医师"**
+     - **"副主任技师" → title="副主任技师"（注意是"技师"不是"医师"）**
   **提取规则：**
-     - 必须完整提取职称文本，不能省略"副"字
-     - 如果键值对中写"职称/职务：副主任医师"，则title="副主任医师"
+     - **必须完整提取职称文本，不能省略"副"字！**
+     - **如果键值对中明确写"副主任医师"，必须提取为"副主任医师"，绝对不能改成"主任医师"！**
+     - **这是最常见的错误，务必注意！**
      - 如果键值对中写"职称/职务：省内知名专家"等非标准职称：
        - 先查找简介中是否有明确职称
        - 如果没有，查看社会职务级别推断
@@ -854,76 +855,6 @@ def process_hospital(channel, hospital_data: Dict[str, Any], delivery_tag):
         print(f"  - 错误数量：{len(errors)} 次")
         print("=" * 70)
         print("\n✅ 当前消息处理完成，等待下一个消息...\n")
-        sys.stdout.flush()
-
-        events = copaw_client.chat(prompt)
-
-        print("\n📥 接收 CoPaw 响应:\n")
-        sys.stdout.flush()
-
-        for event in events:
-            event_type = event.get("type", "unknown")
-
-            if event_type == "thinking_start":
-                msg_id = event.get("data", {}).get("msg_id")
-                print(f"\n💭 Agent 开始思考... (msg_id: {msg_id})")
-                sys.stdout.flush()
-
-            elif event_type == "content_delta":
-                text = event.get("data", {}).get("delta", "")
-                if text:
-                    print(text, end="", flush=True)
-                    content_length += len(text)
-
-            elif event_type == "tool_call":
-                tool_calls += 1
-                tool_data = event.get("data", {})
-                tool_name = tool_data.get("name", "unknown")
-                tool_args = tool_data.get("arguments", {})
-                print(f"\n\n🔧 [{tool_calls}] 工具调用: {tool_name}")
-                if tool_args:
-                    print(f"   参数: {json.dumps(tool_args, ensure_ascii=False)[:200]}")
-                sys.stdout.flush()
-
-            elif event_type == "tool_result":
-                tool_data = event.get("data", {})
-                result_preview = json.dumps(tool_data, ensure_ascii=False)[:200]
-                print(f"   ✅ 工具结果: {result_preview}...\n")
-                sys.stdout.flush()
-
-            elif event_type == "error":
-                error_msg = event.get("data", "未知错误")
-                errors.append(error_msg)
-                print(f"\n❌ 错误: {error_msg}")
-                sys.stdout.flush()
-
-            elif event_type == "response":
-                status = event.get("data", {}).get("status", "unknown")
-                if status == "completed":
-                    print("\n\n✅ Agent 响应完成")
-                else:
-                    print(f"\n📊 响应状态: {status}")
-                sys.stdout.flush()
-
-        elapsed_time = time.time() - start_time
-
-        print("\n" + "=" * 70)
-        print(f"📊 任务统计:")
-        print(f"  - 处理时间: {elapsed_time:.2f} 秒")
-        print(f"  - 输出长度: {content_length} 字符")
-        print(f"  - 工具调用: {tool_calls} 次")
-        print(f"  - 错误数量: {len(errors)} 次")
-        print("=" * 70)
-        sys.stdout.flush()
-
-        ack_success = safe_ack(channel, delivery_tag)
-        if ack_success:
-            processed_count += 1
-            print(f"📊 [{my_consumer_id}] 总计已处理: {processed_count} 条消息\n")
-        else:
-            print(
-                f"⚠️  消息确认失败，消息可能仍留在队列中 (delivery_tag={delivery_tag})\n"
-            )
         sys.stdout.flush()
 
     except KeyboardInterrupt:
