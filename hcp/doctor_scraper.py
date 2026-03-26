@@ -23,6 +23,8 @@ COPAW_BASE_URL = os.getenv("COPAW_BASE_URL", "http://localhost:8088")
 PROMPT_TEMPLATE = r"""
 对 __HOSPITAL_NAME__ 官网进行抓取，提取该医院所有可见医生的详细信息，经过结构化字段提取和数据核验后，将结果逐条实时推送到 RabbitMQ 队列。
 
+**重要：抓取完成后必须将结果推送到 DoctorResult 队列！**
+
 ---
 
 ## 一、执行步骤（按顺序执行）
@@ -334,6 +336,12 @@ PROMPT_TEMPLATE = r"""
 RABBITMQ_URL: amqp://guest:147258369aB@r.pisiewang.top:45672/
 QUEUE_NAME: DoctorResult
 ```
+
+**重要说明：**
+- 抓取到的每个医生信息必须立即推送到 DoctorResult 队列
+- 不要等所有医生抓取完成后再批量推送
+- 每抓取一个医生就推送一个，确保数据实时性
+- 推送前验证数据完整性（姓名、科室、职称必填）
 ---
 
 ## 三、推送数据格式
@@ -769,12 +777,93 @@ def process_hospital(channel, hospital_data: Dict[str, Any], delivery_tag):
     tool_calls = 0
     content_length = 0
     errors = []
+    copaw_completed = False
 
     try:
         print("🤖 发送任务到 CoPaw Agent...")
-        print(f"   API 地址: {copaw_client.config.base_url}")
-        print(f"   超时时间: {copaw_client.config.timeout} 秒")
+        print(f"   API 地址：{copaw_client.config.base_url}")
+        print(f"   超时时间：{copaw_client.config.timeout} 秒")
         print("-" * 70)
+        sys.stdout.flush()
+
+        events = copaw_client.chat(prompt)
+
+        print("\n📥 接收 CoPaw 响应:\n")
+        sys.stdout.flush()
+
+        for event in events:
+            event_type = event.get("type", "unknown")
+
+            if event_type == "thinking_start":
+                msg_id = event.get("data", {}).get("msg_id")
+                print(f"\n💭 Agent 开始思考... (msg_id: {msg_id})")
+                sys.stdout.flush()
+
+            elif event_type == "content_delta":
+                text = event.get("data", {}).get("delta", "")
+                if text:
+                    print(text, end="", flush=True)
+                    content_length += len(text)
+
+            elif event_type == "tool_call":
+                tool_calls += 1
+                tool_data = event.get("data", {})
+                tool_name = tool_data.get("name", "unknown")
+                tool_args = tool_data.get("arguments", {})
+                print(f"\n\n🔧 [{tool_calls}] 工具调用：{tool_name}")
+                if tool_args:
+                    print(f"   参数：{json.dumps(tool_args, ensure_ascii=False)[:200]}")
+                sys.stdout.flush()
+
+            elif event_type == "tool_result":
+                tool_data = event.get("data", {})
+                result_preview = json.dumps(tool_data, ensure_ascii=False)[:200]
+                print(f"   ✅ 工具结果：{result_preview}...\n")
+                sys.stdout.flush()
+
+            elif event_type == "error":
+                error_msg = event.get("data", "未知错误")
+                errors.append(error_msg)
+                print(f"\n❌ 错误：{error_msg}")
+                sys.stdout.flush()
+
+            elif event_type == "response":
+                status = event.get("data", {}).get("status", "unknown")
+                if status == "completed":
+                    print("\n\n✅ Agent 响应完成")
+                    copaw_completed = True
+                else:
+                    print(f"\n📊 响应状态：{status}")
+                sys.stdout.flush()
+
+        elapsed_time = time.time() - start_time
+
+        print("\n" + "=" * 70)
+        print(f"📊 任务统计:")
+        print(f"  - 处理时间：{elapsed_time:.2f} 秒")
+        print(f"  - 输出长度：{content_length} 字符")
+        print(f"  - 工具调用：{tool_calls} 次")
+        print(f"  - 错误数量：{len(errors)} 次")
+        print(f"  - CoPaw 完成状态：{copaw_completed}")
+        print("=" * 70)
+        sys.stdout.flush()
+
+        # 确认 CoPaw 已完成处理后再 ack 消息
+        if copaw_completed and len(errors) == 0:
+            ack_success = safe_ack(channel, delivery_tag)
+            if ack_success:
+                processed_count += 1
+                print(f"\n✅ 消息已确认 (Delivery Tag: {delivery_tag})")
+                print(f"📊 [{my_consumer_id}] 总计已处理：{processed_count} 条消息\n")
+            else:
+                print(
+                    f"⚠️  消息确认失败，消息可能仍留在队列中 (delivery_tag={delivery_tag})\n"
+                )
+        else:
+            # CoPaw 未完成或有错误，消息重新入队
+            print(f"\n⚠️  CoPaw 处理未完成或有错误，消息将重新入队")
+            print(f"   copaw_completed={copaw_completed}, errors={len(errors)}")
+            safe_ack(channel, delivery_tag, requeue=True)
         sys.stdout.flush()
 
         events = copaw_client.chat(prompt)
