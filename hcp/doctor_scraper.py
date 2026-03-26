@@ -777,13 +777,22 @@ def process_hospital(channel, hospital_data: Dict[str, Any], delivery_tag):
     tool_calls = 0
     content_length = 0
     errors = []
-    copaw_completed = False
 
     try:
         print("🤖 发送任务到 CoPaw Agent...")
         print(f"   API 地址：{copaw_client.config.base_url}")
         print(f"   超时时间：{copaw_client.config.timeout} 秒")
         print("-" * 70)
+        sys.stdout.flush()
+
+        # 消息立即 ack（出队），不等待 CoPaw 完成
+        ack_success = safe_ack(channel, delivery_tag)
+        if ack_success:
+            processed_count += 1
+            print(f"\n✅ 消息已确认出队 (Delivery Tag: {delivery_tag})")
+            print(f"📊 [{my_consumer_id}] 总计已处理：{processed_count} 条消息\n")
+        else:
+            print(f"\n⚠️  消息确认失败 (delivery_tag={delivery_tag})\n")
         sys.stdout.flush()
 
         events = copaw_client.chat(prompt)
@@ -830,8 +839,7 @@ def process_hospital(channel, hospital_data: Dict[str, Any], delivery_tag):
             elif event_type == "response":
                 status = event.get("data", {}).get("status", "unknown")
                 if status == "completed":
-                    print("\n\n✅ Agent 响应完成")
-                    copaw_completed = True
+                    print("\n\n✅ Agent 响应完成 - 准备消费下一个消息")
                 else:
                     print(f"\n📊 响应状态：{status}")
                 sys.stdout.flush()
@@ -844,26 +852,8 @@ def process_hospital(channel, hospital_data: Dict[str, Any], delivery_tag):
         print(f"  - 输出长度：{content_length} 字符")
         print(f"  - 工具调用：{tool_calls} 次")
         print(f"  - 错误数量：{len(errors)} 次")
-        print(f"  - CoPaw 完成状态：{copaw_completed}")
         print("=" * 70)
-        sys.stdout.flush()
-
-        # 确认 CoPaw 已完成处理后再 ack 消息
-        if copaw_completed and len(errors) == 0:
-            ack_success = safe_ack(channel, delivery_tag)
-            if ack_success:
-                processed_count += 1
-                print(f"\n✅ 消息已确认 (Delivery Tag: {delivery_tag})")
-                print(f"📊 [{my_consumer_id}] 总计已处理：{processed_count} 条消息\n")
-            else:
-                print(
-                    f"⚠️  消息确认失败，消息可能仍留在队列中 (delivery_tag={delivery_tag})\n"
-                )
-        else:
-            # CoPaw 未完成或有错误，消息重新入队
-            print(f"\n⚠️  CoPaw 处理未完成或有错误，消息将重新入队")
-            print(f"   copaw_completed={copaw_completed}, errors={len(errors)}")
-            safe_ack(channel, delivery_tag, requeue=True)
+        print("\n✅ 当前消息处理完成，等待下一个消息...\n")
         sys.stdout.flush()
 
         events = copaw_client.chat(prompt)
