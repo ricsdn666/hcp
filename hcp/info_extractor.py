@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import json
+import os
+import sys
+import time
+import uuid
+import psycopg2
+
+from typing import Dict, Any, Optional, List
+
+from copaw_client import CoPawClient, CoPawConfig
+
+# 使用CoPaw v0.1.0.post1
+
+COPAW_BASE_URL = os.getenv("COPAW_BASE_URL", "http://192.168.100.23:8088")
+PROMPT_TEMPLATE = r"""
+对 __Doctor_URL__ 进行提取，**只提取该 URL 对应的目标医生的详细信息**，经过结构化字段提取后，将结果推送到 RabbitMQ 队列。
+
+**极其重要：只处理当前页面的目标医生，严禁处理页面上出现的其他医生！**
+- ❌ 禁止提取：推荐医生、相关医生、同科室医生、热门医生、猜你喜欢等模块中的医生
+- ✅ 只提取：当前 URL 对应的唯一目标医生（页面主体内容展示的医生）
+
+**识别目标医生的方法：**
+- 页面标题中的医生姓名
+- URL 中包含的医生 ID 或姓名
+- 页面主体内容（main content）中展示的医生
+-  breadcrumbs/导航路径 中指向的医生
+
+---
+
+## 一、执行步骤（按顺序执行）
+
+### 1. 访问目标 URL 并识别目标医生
+- 访问指定的医生详情页 URL
+- **确认当前页面类型**：必须是医生详情页，而非列表页
+- **识别目标医生**：
+  - 查看页面标题（title 标签），提取医生姓名
+  - 查看 URL 结构，确认医生标识（ID 或姓名拼音）
+  - 定位页面主体内容区域（通常是 `<main>`, `<div class="doctor-content">`, `<div class="detail-content">` 等）
+- **排除其他医生信息**：
+  - 忽略"推荐专家"、"相关医生"、"同科室医生"、"热门医生"等侧边栏/底部模块
+  - 忽略"医生团队"、"专家团队"等列表式展示
+  - 忽略"您可能还想看"、"猜你喜欢"等推荐模块
+  - 忽略页眉/页脚中的医生链接
+
+### 2. 验证目标医生身份
+**关键验证步骤（必须执行）：**
+- 确认页面只提取 **一个医生** 的信息
+- 核对页面主体内容的医生姓名与页面标题一致
+- 如果页面包含多个医生信息，**只提取 URL 对应的那个医生**
+- 如果无法确定哪个是目标医生，输出警告并跳过
+
+**典型页面结构分析：**
+```html
+<!-- 目标医生区域（要提取） -->
+<main class="doctor-detail">
+    <h1>张三 主任医师</h1>
+    <div class="info">...</div>
+</main>
+
+<!-- 推荐医生区域（忽略） -->
+<aside class="recommend-doctors">
+    <div class="doctor-card">李四...</div>
+    <div class="doctor-card">王五...</div>
+</aside>
+
+<!-- 底部推荐（忽略） -->
+<div class="related-doctors">
+    <div class="doctor-item">赵六...</div>
+</div>
+```
+
+### 3. 提取目标医生详细信息
+
+**只从目标医生所在区域提取以下字段：**
+- name: 医生姓名（必须是页面主体的目标医生）
+- hospital: 医院全称
+- standard_department: 标准科室名
+- display_department: 展示科室名
+- title: 职称
+- administrative_position: 行政职务
+- academic_title: 学术头衔
+- education: 学历
+- degree: 学位
+- alma_mater: 毕业院校
+- years_of_experience: 从业年限
+- intro: 医生简介原文
+- specialty: 擅长领域原文
+
+**提取时的重要规则：**
+1. 只从页面主体的目标医生区域提取
+2. 忽略侧边栏、底部、推荐区域中的任何医生信息
+3. 如果页面包含多个医生卡片，只提取与 URL 对应的那个
+4. 字段缺失时用 null 填充，不要编造数据
+
+**数据核验步骤：**
+- 确认只提取了一个医生的信息
+- 核对医生姓名与页面标题一致
+- 验证数据完整性（姓名、科室、职称必填）
+- 推送到 RabbitMQ 队列
+
+---
+
+## 二、推送数据格式
+
+```json
+{
+  "name": "医生姓名（必须与页面标题一致）",
+  "hospital": "医院全称",
+  "standard_department": "标准科室名",
+  "display_department": "展示科室名",
+  "title": "职称",
+  "administrative_position": "行政职务",
+  "academic_title": "学术头衔",
+  "education": "学历",
+  "degree": "学位",
+  "alma_mater": "毕业院校",
+  "years_of_experience": 28,
+  "intro": "医生简介原文",
+  "specialty": "擅长领域原文",
+  "confidence_score": 100.0,
+  "otherpropertys": "{\"confidence_name\": \"官网\", \"source_kind\": \"official\", \"seed_url\": \"官网首页 URL\", \"root_domain\": \"域名\", \"url\": \"医生详情页 URL\", \"match_score\": 1.0, \"page_record_time\": null, \"fetch_method\": \"playwright\"}",
+  "source_model": "9S"
+}
+```
+
+**数据核验规则：**
+
+1. **唯一性验证**：只提取一个医生的信息
+2. **一致性验证**：提取的医生姓名必须与页面标题中的姓名一致
+3. **完整性验证**：至少包含姓名、科室、职称三个必填字段
+4. **来源验证**：只从页面主体内容区域提取，忽略推荐/相关医生模块
+
+### 核验失败的处理：
+- 如果页面包含多个医生且无法确定目标医生：输出警告并跳过
+- 如果提取的医生信息与 URL 不对应：重新分析页面结构
+- 如果页面不是详情页（是列表页）：输出错误并不推送
+
+---
+
+## 三、队列配置
+
+```
+RABBITMQ_URL: amqp://guest:147258369aB@r.pisiewang.top:45672/
+QUEUE_NAME: DoctorResult
+```
+
+**重要说明：**
+- 每个医生信息必须立即推送到 DoctorResult 队列
+- 推送前验证数据完整性和唯一性
+- 只推送目标 URL 对应的医生信息
+"""
+
+
+copaw_client: Optional[CoPawClient] = None
+processed_count = 0
+my_consumer_id = f"scraper_{uuid.uuid4().hex[:8]}"
+
+
+def process_doctor(url):
+    global copaw_client, processed_count
+
+    if copaw_client is None:
+        print("❌ CoPaw client 未初始化")
+        return
+
+    sys.stdout.flush()
+
+    prompt = PROMPT_TEMPLATE.replace("__Doctor_URL__", url)
+    prompt_preview = prompt[:200].replace("\n", " ")
+    print(f"📝 Prompt 预览: {prompt_preview}...")
+    print(f"📏 Prompt 总长度: {len(prompt)} 字符\n")
+    sys.stdout.flush()
+
+    start_time = time.time()
+    tool_calls = 0
+    content_length = 0
+    errors = []
+
+    try:
+        print("🤖 发送任务到 CoPaw Agent...")
+        print(f"   API 地址：{copaw_client.config.base_url}")
+        print(f"   超时时间：{copaw_client.config.timeout} 秒")
+        print("-" * 70)
+        sys.stdout.flush()
+
+        events = copaw_client.chat(prompt)
+
+        print("\n📥 接收 CoPaw 响应:\n")
+        sys.stdout.flush()
+
+        for event in events:
+            event_type = event.get("type", "unknown")
+
+            if event_type == "thinking_start":
+                msg_id = event.get("data", {}).get("msg_id")
+                print(f"\n💭 Agent 开始思考... (msg_id: {msg_id})")
+                sys.stdout.flush()
+
+            elif event_type == "content_delta":
+                text = event.get("data", {}).get("delta", "")
+                if text:
+                    print(text, end="", flush=True)
+                    content_length += len(text)
+
+            elif event_type == "tool_call":
+                tool_calls += 1
+                tool_data = event.get("data", {})
+                tool_name = tool_data.get("name", "unknown")
+                tool_args = tool_data.get("arguments", {})
+                print(f"\n\n🔧 [{tool_calls}] 工具调用：{tool_name}")
+                if tool_args:
+                    print(f"   参数：{json.dumps(tool_args, ensure_ascii=False)[:200]}")
+                sys.stdout.flush()
+
+            elif event_type == "tool_result":
+                tool_data = event.get("data", {})
+                result_preview = json.dumps(tool_data, ensure_ascii=False)[:200]
+                print(f"   ✅ 工具结果：{result_preview}...\n")
+                sys.stdout.flush()
+
+            elif event_type == "error":
+                error_msg = event.get("data", "未知错误")
+                errors.append(error_msg)
+                print(f"\n❌ 错误：{error_msg}")
+                sys.stdout.flush()
+
+            elif event_type == "response":
+                status = event.get("data", {}).get("status", "unknown")
+                if status == "completed":
+                    print("\n\n✅ Agent 响应完成 - 准备消费下一个消息")
+                else:
+                    print(f"\n📊 响应状态：{status}")
+                sys.stdout.flush()
+
+        elapsed_time = time.time() - start_time
+
+        print("\n" + "=" * 70)
+        print(f"📊 任务统计:")
+        print(f"  - 处理时间：{elapsed_time:.2f} 秒")
+        print(f"  - 输出长度：{content_length} 字符")
+        print(f"  - 工具调用：{tool_calls} 次")
+        print(f"  - 错误数量：{len(errors)} 次")
+        print("=" * 70)
+        print("\n✅ 当前消息处理完成，等待下一个消息...\n")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"\n❌ 处理过程出错：{e}")
+        errors.append(str(e))
+
+
+def main():
+    global copaw_client, processed_count
+
+    config = CoPawConfig(base_url=COPAW_BASE_URL, timeout=3600.0)
+    copaw_client = CoPawClient(config)
+
+    print("\n🔍 检查 CoPaw API 连接...")
+    sys.stdout.flush()
+
+    if not copaw_client.health_check():
+        print(f"\n❌ 无法连接到 CoPaw API: {COPAW_BASE_URL}")
+        print("   请检查:")
+        print("   1. CoPaw 服务是否运行")
+        print("   2. API 地址是否正确")
+        print("   3. 网络连接是否正常")
+        sys.exit(1)
+
+    print("✅ CoPaw API 连接成功\n")
+    sys.stdout.flush()
+
+    retry_count = 0
+
+    conn = psycopg2.connect(
+        host="r.pisiewang.top",
+        port="54321",
+        database="datafresh",
+        user="postgres",
+        password="j2UiYbIsDm3TZMP2",
+    )
+    cursor = conn.cursor()
+    # cursor.execute("SELECT * FROM datafresh.doctor_search where source_model <> '9S'")
+    cursor.execute(
+        "SELECT * FROM datafresh.doctor_search where source_model <> '9S' and hospital not like '%广东省人民%' "
+    )
+    rows = cursor.fetchall()
+
+    if cursor.description is None:
+        print("❌ 查询未返回结果集")
+        conn.close()
+        return
+
+    column_names = [desc[0] for desc in cursor.description]
+
+    for row in rows:
+        row_dict = dict(zip(column_names, row))
+        otherpropertys = row_dict.get("otherpropertys")
+
+        if otherpropertys:
+            try:
+                otherpropertys = json.loads(otherpropertys)
+                process_doctor(otherpropertys["url"])
+
+            except json.JSONDecodeError as e:
+                print(f"❌ JSON 解析失败：{e}")
+                print(f"   原始数据：{otherpropertys[:200]}...")
+        else:
+            print(f"⚠️ otherpropertys 为空")
+
+        print("-" * 70)
+        sys.stdout.flush()
+
+    conn.close()
+    print(f"成功读取 {len(rows)} 条记录")
+    sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()
