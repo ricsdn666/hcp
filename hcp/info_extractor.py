@@ -13,7 +13,7 @@ from copaw_client import CoPawClient, CoPawConfig
 
 # 使用CoPaw v0.1.0.post1
 
-COPAW_BASE_URL = os.getenv("COPAW_BASE_URL", "http://192.168.100.23:8088")
+COPAW_BASE_URL = os.getenv("COPAW_BASE_URL", "http://192.168.100.23:8081")
 PROMPT_TEMPLATE = r"""
 对 __Doctor_URL__ 进行提取，**只提取该 URL 对应的目标医生的详细信息**，经过结构化字段提取后，将结果推送到 RabbitMQ 队列。
 
@@ -91,6 +91,9 @@ PROMPT_TEMPLATE = r"""
   - 🏥 **重要：如果学校名称包含"大学 + 医学院/附属医院"，只提取大学名称**
   - ✅ 正确：`"蚌埠医学院"`、`"北京大学"`、`"华中科技大学"`、`"复旦大学"`
   - ❌ 错误：`"蚌埠医学院临床医学系"`、`"北京大学医学部临床专业"`、`"华中科技大学同济医学院"`、`"复旦大学附属医院"`
+- years_of_experience: 从业年限（**提取数字，如"从事超声诊断工作二十年" → 20**）
+  - 💼 **重要：从简介/擅长描述中提取工作年限**
+  - 💼 **支持中文数字转换**：`"二十年"` → `20`，`"三十年"` → `30`
 - years_of_experience: 从业年限
 - intro: 医生简介原文
 - specialty: 擅长领域原文
@@ -110,8 +113,12 @@ PROMPT_TEMPLATE = r"""
 6. **education（学历）必须从标准值中选择，需进行规范化映射**
    - 可选值：`博士研究生 `、`硕士研究生 `、`本科`、`大专`、` 中专`、` 高中`、` 初中及以下`
    - 映射示例：`"博士"` → `"博士研究生"`，`"硕士"` → `"硕士研究生"`，`"大学"` → `"本科"`，`"专科"` → `"大专"`
-   - 🎓 **重要规则：如果页面显示多个学历信息，只提取最高学历**（博士 > 硕士 > 本科 > 大专 > 中专 > 高中 > 初中及以下）
-7. **academic_title（学术头衔）必须从标准值中选择，需进行规范化映射**
+    - 🎓 **重要规则：如果页面显示多个学历信息，只提取最高学历**（博士 > 硕士 > 本科 > 大专 > 中专 > 高中 > 初中及以下）
+7. **years_of_experience（从业年限）**
+   - 💼 **从简介/擅长中提取工作年限**，提取数字
+   - 💼 **支持中文数字转换**：`"二十年"` → `20`，`"三十年"` → `30`
+   - 💼 **示例**：`"从事超声诊断工作二十年"` → `20`，`"从业 30 年"` → `30`
+8. **academic_title（学术头衔）必须从标准值中选择，需进行规范化映射**
    - 可选值：`教授 `、`副教授 `、`讲师`、` 助教`、` 研究员`、` 副研究员`、` 助理研究员`、` 研究实习员`
    - 映射示例：`"博导"` → 根据实际职称填写，`"客座教授"` → `"教授"`，`"助理教授"` → `"助教"`
 8. **administrative_position（行政职务）必须从标准值中选择，需进行规范化映射**
@@ -317,9 +324,7 @@ def main():
     )
     cursor = conn.cursor()
     # cursor.execute("SELECT * FROM datafresh.doctor_search where source_model <> '9S'")
-    cursor.execute(
-        "SELECT * FROM datafresh.doctor_search where source_model <> '9S' and hospital not like '%广东省人民%' "
-    )
+    cursor.execute("SELECT * FROM datafresh.doctor_search where source_model <> '9S'  ")
     rows = cursor.fetchall()
 
     if cursor.description is None:
