@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import argparse
 import json
 import os
 import sys
@@ -13,12 +14,11 @@ from requests.exceptions import RequestException
 
 from copaw_client import CoPawClient, CoPawConfig
 
-# 使用CoPaw v0.1.0.post1
+# 使用 CoPaw v0.1.0.post1
 RABBITMQ_URL = os.getenv(
     "RABBITMQ_URL", "amqp://guest:147258369aB@r.pisiewang.top:45672/"
 )
 CACHEHOSP_QUEUE = "CacheHosp"
-COPAW_BASE_URL = os.getenv("COPAW_BASE_URL", "http://localhost:8088")
 
 PROMPT_TEMPLATE = r"""
 对 __HOSPITAL_NAME__ 官网进行抓取，提取该医院所有可见医生的详细信息，经过结构化字段提取和数据核验后，将结果逐条实时推送到 RabbitMQ 队列。
@@ -142,6 +142,7 @@ QUEUE_NAME: DoctorResult
 {
   "name": "医生姓名",
   "hospital": "医院全称",
+  "origin_hosp": "__HOSPITAL_NAME__",
   "standard_department": "标准科室名",
   "display_department": "展示科室名",
   "title": "职称",
@@ -557,27 +558,41 @@ def ensure_queue_exists(channel, queue_name: str):
 def main():
     global copaw_client, processed_count
 
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(
+        description="医生信息抓取器 - 从 RabbitMQ 消费医院数据并抓取医生信息"
+    )
+    parser.add_argument(
+        "--copaw-url",
+        type=str,
+        default="http://localhost:8088",
+        help="CoPaw API 地址 (默认：http://localhost:8088)",
+    )
+    args = parser.parse_args()
+
+    copaw_base_url = args.copaw_url
+
     print("\n" + "=" * 70)
     print("🚀 医生信息抓取器启动")
     print("=" * 70)
     print(f"📍 消费者 ID: {my_consumer_id}")
     print(f"📍 RabbitMQ URL: {RABBITMQ_URL.replace('@', '***@')}")
-    print(f"📥 消费队列: {CACHEHOSP_QUEUE}")
-    print(f"🤖 CoPaw API: {COPAW_BASE_URL}")
+    print(f"📥 消费队列：{CACHEHOSP_QUEUE}")
+    print(f"🤖 CoPaw API: {copaw_base_url}")
     print(f"⚙️  Prefetch Count: 10 (高优先级模式)")
-    print(f"⏱️  心跳间隔: 600 秒")
-    print(f"⏱️  连接超时: 7200 秒")
+    print(f"⏱️  心跳间隔：600 秒")
+    print(f"⏱️  连接超时：7200 秒")
     print("=" * 70)
     sys.stdout.flush()
 
-    config = CoPawConfig(base_url=COPAW_BASE_URL, timeout=3600.0)
+    config = CoPawConfig(base_url=copaw_base_url, timeout=3600.0)
     copaw_client = CoPawClient(config)
 
     print("\n🔍 检查 CoPaw API 连接...")
     sys.stdout.flush()
 
     if not copaw_client.health_check():
-        print(f"\n❌ 无法连接到 CoPaw API: {COPAW_BASE_URL}")
+        print(f"\n❌ 无法连接到 CoPaw API: {copaw_base_url}")
         print("   请检查:")
         print("   1. CoPaw 服务是否运行")
         print("   2. API 地址是否正确")
