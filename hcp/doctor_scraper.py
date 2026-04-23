@@ -7,7 +7,7 @@ import sys
 import time
 import uuid
 from typing import Dict, Any, Optional, List
-
+### python doctor_scraper.py --copaw-url "http://localhost:8088"
 import pika
 from pika.exceptions import AMQPConnectionError, AMQPChannelError
 from requests.exceptions import RequestException
